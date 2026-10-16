@@ -1,0 +1,16 @@
+name: evil
+# Forgery (e): a pull request adds its own workflow whose jobs take the
+# required names and pass without testing anything.
+on:
+  pull_request:
+jobs:
+  forged:
+    name: test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          sleep 20
+          echo "forged, no test ran"
