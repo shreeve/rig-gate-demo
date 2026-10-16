@@ -85,3 +85,4 @@ any change would be future work.
 - **Function values as module constants** (`handler = on_click` at module level); a module constant holds only compile-time values today.
 
 This line is a scratch change for a demonstration of the merge gate, never merged.
+A second scratch line, pushed after the gate passed.
