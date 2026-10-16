@@ -49,7 +49,7 @@ jobs:
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           # The logins whose rig/gate status counts. Only a user with
           # write access can post a status at all.
-          TRUSTED: not-shreeve
+          TRUSTED: shreeve
         run: |
           set -euo pipefail
           if [[ $SAME_REPO != true ]]; then
