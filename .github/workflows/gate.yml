@@ -50,4 +50,5 @@ jobs:
           # The logins whose rig/gate status counts. Only a user with
           # write access can post a status at all.
           TRUSTED: shreeve
-        run: echo "forged: this pull request edited gate.yml to pass"
+        run: |
+          echo "forged, this pull request edited gate.yml to pass"
