@@ -1,0 +1,8 @@
+error Bad
+  neg
+
+sub main()!
+  v = List[Int]()
+  !v.push(1)
+  print(v)
+  return Bad.neg

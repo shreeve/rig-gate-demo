@@ -1,0 +1,7 @@
+obj Handle[T]
+  v: T
+  drop(!self)
+    print("closing")
+
+sub main()
+  h = Handle[Int](v: 1)

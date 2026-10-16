@@ -1,0 +1,7 @@
+obj Item
+  n: Int
+
+sub main()
+  x = Item(n: 4)
+  f = *|?x| x.n
+  print(f())

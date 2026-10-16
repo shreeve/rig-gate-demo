@@ -1,0 +1,10 @@
+obj S
+  items: List[Int]
+
+  fun has(?self) -> Bool
+    self.items.len > 0
+
+sub main()
+  s = S(items: List())
+  if !s.has()
+    print("empty")

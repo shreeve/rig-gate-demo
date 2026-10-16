@@ -1,0 +1,8 @@
+obj P
+  x: Int
+  fun get(?self) -> Int
+    self.x
+
+sub main()
+  p = P(x: 1)
+  print(p.get(), ?p.get())

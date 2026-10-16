@@ -1,0 +1,6 @@
+obj T
+  drop: Int
+
+sub main()
+  t = T(drop: 1)
+  print(t.drop)

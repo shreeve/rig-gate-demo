@@ -1,0 +1,6 @@
+obj P
+  x: Int
+
+sub main()
+  s = *^P(x: 1)
+  print(s.x)

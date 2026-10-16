@@ -1,0 +1,5 @@
+obj Hidden
+  n: Int
+
+pub fun make() -> Int
+  1

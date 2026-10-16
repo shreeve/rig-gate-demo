@@ -1,0 +1,10 @@
+obj P
+  x: Int
+
+fun unbox[T](b: ^T) -> T
+  b.value
+
+sub main()
+  p = P(x: 9)
+  r = unbox(^?p)
+  print(r.x)

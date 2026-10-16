@@ -1,0 +1,9 @@
+obj S
+  n: Int
+
+fun mk() -> ?S
+  s = S(n: 1)
+  ?s
+
+sub main()
+  print(mk().n)

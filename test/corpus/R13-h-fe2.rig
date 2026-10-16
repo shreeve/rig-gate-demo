@@ -1,0 +1,5 @@
+obj N
+  a: Int
+
+sub main()
+  x: *N! = 1

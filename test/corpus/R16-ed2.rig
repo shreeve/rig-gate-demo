@@ -1,0 +1,14 @@
+obj View
+  w: ?List[Int]
+
+  drop(!self)
+    print("view drop", self.w.len)
+
+sub main()
+  v: List[Int] = List()
+  !v.push(1)
+  view = View(w: ?v)
+  f = |<view| view.w.len
+  print(f())
+  <v
+  print("after")

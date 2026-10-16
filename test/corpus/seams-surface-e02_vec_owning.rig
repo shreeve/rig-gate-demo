@@ -1,0 +1,7 @@
+obj R
+  n: Int
+  drop(!self)
+    pass
+
+sub main()
+  v: List[R] = List()

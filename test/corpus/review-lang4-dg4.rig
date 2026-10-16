@@ -1,0 +1,10 @@
+obj H
+  w: !List[Int]
+
+sub main()
+  v: List[Int] = List()
+  !v.push(1)
+  h = H(w: !v)
+  for x in ?h.w
+    h.w = List[Int]()
+    print(x)

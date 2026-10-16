@@ -1,0 +1,7 @@
+fun first[T](xs: ?List[T]) -> T
+  xs[0]
+
+sub main()
+  v: List[String] = List()
+  !v.push(String("a"))
+  print(first(?v))

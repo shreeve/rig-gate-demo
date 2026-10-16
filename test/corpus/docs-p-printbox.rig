@@ -1,0 +1,9 @@
+obj P
+  x: Int
+
+sub main()
+  b = ^P(x: 1)
+  c = Cell(5)
+  s = ^"hi"
+  n = ^3
+  print(b, c, s, n)

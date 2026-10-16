@@ -1,0 +1,9 @@
+sub f[T](v: ?List[T])
+  for x in v
+    <x
+
+sub main()
+  v: List[String] = List()
+  !v.push(String("a"))
+  f(v)
+  print(v)

@@ -1,0 +1,4 @@
+sub main()
+  x: String? = String("a")
+  a = [2 of ?x]
+  print(a[0])

@@ -1,0 +1,8 @@
+obj Wrap[T]
+  item: T
+
+sub main()
+  v = List[Int]()
+  w = Wrap(?v)
+  <v
+  print(w)

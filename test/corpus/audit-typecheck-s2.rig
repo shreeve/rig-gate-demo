@@ -1,0 +1,5 @@
+obj Holder
+  v: List[Int]
+
+sub main()
+  a = [Holder(v: List[Int]())]

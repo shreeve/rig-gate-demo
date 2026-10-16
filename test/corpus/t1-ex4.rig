@@ -1,0 +1,7 @@
+fun main() -> Int
+  v: List[Int] = List()
+  !v.push(1)
+  0
+
+test "t"
+  print(1)

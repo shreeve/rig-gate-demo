@@ -1,0 +1,7 @@
+obj P
+  x: Int
+
+sub main()
+  o: P? = P(x: 1)
+  if *o as h
+    print(h.x)

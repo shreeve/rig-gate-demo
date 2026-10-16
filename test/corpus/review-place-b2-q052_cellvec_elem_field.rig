@@ -1,0 +1,7 @@
+obj P
+  x: Int
+
+sub main()
+  c: Cell[List[P]] = Cell(List())
+  !c.push(P(x: 1))
+  c[0].x = 5

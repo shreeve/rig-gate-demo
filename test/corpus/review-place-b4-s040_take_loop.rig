@@ -1,0 +1,7 @@
+obj P
+  o: (?String)?
+
+sub main()
+  ps = [P(o: "a")]
+  for p in ps
+    x = <p.o

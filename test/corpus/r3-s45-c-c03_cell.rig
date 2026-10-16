@@ -1,0 +1,7 @@
+obj C
+  n: Cell[Int]
+  t: String
+
+sub main()
+  c = C(n: Cell(1), t: String("x"))
+  d = +c

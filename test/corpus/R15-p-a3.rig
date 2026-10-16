@@ -1,0 +1,8 @@
+# root reassigned
+sub main()
+  v: List[Int] = List()
+  !v.push(1)
+  w = !v[..]
+  v = List()
+  w[0] = 5
+  print(v)

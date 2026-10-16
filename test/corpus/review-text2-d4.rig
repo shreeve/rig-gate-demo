@@ -1,0 +1,10 @@
+fun boxes() -> List[^String]
+  v: List[^String] = List()
+  !v.push(^String("one"))
+  v
+
+sub main()
+  o = "init"
+  for b in ?boxes()
+    o = ?b.value[..]
+  print(o)

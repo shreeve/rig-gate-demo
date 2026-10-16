@@ -1,0 +1,448 @@
+# std.text: searching, slicing, splitting, and parsing text, which every
+# function reads as a `?String`: UTF-8 bytes by convention, and nothing
+# here checks that it is. Every index is a byte index; a count names its
+# unit. Every function that returns a `?String` returns a view of the
+# `?String` it was given, so nothing here allocates but `format_int`,
+# which returns a new String, and `edit_distance`, which grows the `row`
+# it is given.
+#
+# A char is what a reader sees as one character: a Unicode extended
+# grapheme cluster (UAX #29), of one rune or several, by the tables of
+# Unicode 15.1. The char tools read bytes that are not UTF-8 as Go does,
+# each such byte one rune, U+FFFD, so every byte is in exactly one char,
+# and the chars of a `?String` tile it.
+
+use std.utf8
+
+# Why a parse failed: the text is not a number (or Bool) as written,
+# or it is one too large for its type.
+pub error ParseError
+  invalid
+  overflow
+
+# ---- Searching ---------------------------------------------------------
+
+# Whether `pat` occurs in `s`; every `?String` contains "".
+pub fun contains(s: ?String, pat: ?String) -> Bool
+  find(s, pat) != none
+
+# Whether `s` begins with `prefix`.
+pub fun starts_with(s: ?String, prefix: ?String) -> Bool
+  prefix.len <= s.len and s[..prefix.len] == prefix
+
+# Whether `s` ends with `suffix`.
+pub fun ends_with(s: ?String, suffix: ?String) -> Bool
+  suffix.len <= s.len and s[s.len - suffix.len..] == suffix
+
+# ---- Byte sets -----------------------------------------------------------
+
+# The index of the first byte of `s` at or after `i` that is one of the
+# bytes of `set`, or `none` when there is none; an empty `set` holds no
+# byte, so the result is `none`. `i` is a cursor, `0 <= i <= s.len`;
+# outside that it panics, as indexing does. `set` is known at compile
+# time, so each set is its own instance, with its bytes as constants.
+#
+# It tests 16 bytes at a time, then the last 16 bytes of `s` read again,
+# leaving out the lanes already tested; in a text shorter than 16 bytes,
+# one U64 (`set64`), then byte by byte. Each step asks of a block of
+# bytes which hold a byte of the set, so the same walk serves any other
+# test of one byte at a time.
+pub fun find_any[set: ?String](s: ?String, i: Int) -> Int?
+  if i >= 0 and i <= s.len
+    return none if set.len == 0
+    j = i
+    while j + 16 <= s.len : j += 16
+      if set16[set](s.read[Simd[U8, 16]](j)).first() as k
+        return j + k
+    if j < s.len and s.len >= 16
+      # Fewer than 16 bytes are left: read the last 16 of `s` again, and
+      # drop the lanes before `j`, which were tested or come before `i`.
+      m = set16[set](s.read[Simd[U8, 16]](s.len - 16)).bits() >> (j + 16 - s.len)
+      return j + m.trailing_zeros() if m != 0
+      return none
+    if j + 8 <= s.len
+      m = set64[set](s.read[U64, .little](j))
+      return j + (m.trailing_zeros() >> 3) if m != 0
+      j += 8
+    while j < s.len : j += 1
+      for b in set
+        return j if s[j] == b
+    return none
+  _ = s[i]  # outside 0 to `s.len`: panics, as indexing does
+  none
+
+# The lanes of `v` that hold a byte of `set`: one compare for each byte.
+fun set16[set: ?String](v: Simd[U8, 16]) -> Simd[Bool, 16]
+  m = Simd[Bool, 16].splat(false)
+  for b in set
+    m |= v == b
+  m
+
+# The top bit of each byte of `w` that holds a byte of `set`, exact only
+# at the lowest one, which is all a caller may read (with
+# `trailing_zeros`). `(x - 1) & ~x` marks a byte of `x` that is 0, and
+# subtracting 1 from a byte that is 0 takes 1 from the byte above, which
+# can mark bytes above it as well, never below (Mycroft's test), so an OR
+# of such marks is exact at its lowest.
+fun set64[set: ?String](w: U64) -> U64
+  m: U64 = 0
+  for b in set
+    x = w ^ (ONES64 * U64(b))
+    m |= (x -% ONES64) & x.not()
+  m & HIGHS64
+
+# The index of the first byte of `s` at or after `i` whose class,
+# `table[b]`, has no bit of `mask`, or `s.len` when every byte from `i`
+# has one. The caller's table gives each of the 256 bytes its class bits,
+# so any set of bytes costs one load and one test per byte. `i` is a
+# cursor, `0 <= i <= s.len`; outside that it panics, as indexing does.
+pub fun class_end(s: ?String, i: Int, table: ?[256]U8, mask: U8) -> Int
+  if i >= 0 and i <= s.len
+    j = i
+    while j < s.len and table[s[j]] & mask != 0
+      j += 1
+    return j
+  _ = s[i]  # outside 0 to `s.len`: panics, as indexing does
+  s.len
+
+ONES64: U64 = 0x0101010101010101
+HIGHS64: U64 = 0x8080808080808080
+
+# ---- Views ---------------------------------------------------------------
+
+# `s` without its leading and trailing ASCII whitespace (`is_space`).
+pub fun trim(s: ?String) -> ?String
+  trim_end(trim_start(s))
+
+# `s` without its leading ASCII whitespace.
+pub fun trim_start(s: ?String) -> ?String
+  i = 0
+  while i < s.len and is_space(s[i])
+    i += 1
+  s[i..]
+
+# `s` without its trailing ASCII whitespace.
+pub fun trim_end(s: ?String) -> ?String
+  n = s.len
+  while n > 0 and is_space(s[n - 1])
+    n -= 1
+  s[..n]
+
+# `s` after `prefix`, or `none` when `s` does not begin with it. The
+# result views `s` alone.
+pub fun strip_prefix(s: ?String, prefix: ?String) -> (?String)? from s
+  return none if not starts_with(s, prefix)
+  s[prefix.len..]
+
+# `s` before `suffix`, or `none` when `s` does not end with it. The
+# result views `s` alone.
+pub fun strip_suffix(s: ?String, suffix: ?String) -> (?String)? from s
+  return none if not ends_with(s, suffix)
+  s[..s.len - suffix.len]
+
+# The two parts of a `?String` around a separator, which `cut` gives.
+pub obj Cut
+  pub before: ?String
+  pub after: ?String
+
+# `s` around the first `sep` in it: the part before it and the part
+# after it, or `none` when `sep` does not occur in `s`. Both view `s`
+# alone.
+pub fun cut(s: ?String, sep: ?String) -> Cut? from s
+  i = find(s, sep)?
+  Cut(before: s[..i], after: s[i + sep.len..])
+
+# ---- Splitting ---------------------------------------------------------
+
+# The parts of a `?String` between the occurrences of a separator, which
+# `split` gives, in order: `for part in text.split(s, sep)`.
+pub obj Split
+  rest: ?String
+  sep: ?String
+  done: Bool
+
+  # The next part, or `none` after the last.
+  pub fun next(!self) -> (?String)?
+    return none if self.done
+    at = find(self.rest, self.sep) ?? -1
+    if at < 0
+      self.done = true
+      return self.rest
+    part = self.rest[..at]
+    self.rest = self.rest[at + self.sep.len..]
+    part
+
+# The parts of `s` between the occurrences of `sep`, left to right:
+# one more than `count(s, sep)`, some of which may be empty. Panics
+# when `sep` is empty.
+pub fun split(s: ?String, sep: ?String) -> Split
+  if sep.len == 0
+    empty_separator()
+  Split(rest: s, sep: sep, done: false)
+
+# The lines of a `?String`, which `lines` gives, in order:
+# `for line in text.lines(s)`.
+pub obj Lines
+  rest: ?String
+
+  # The next line, without its line ending, or `none` after the last.
+  pub fun next(!self) -> (?String)?
+    return none if self.rest.len == 0
+    end = find(self.rest, "\n") ?? -1
+    if end < 0
+      line = self.rest
+      self.rest = ""
+      return line
+    line = self.rest[..end]
+    self.rest = self.rest[end + 1..]
+    strip_suffix(line, "\r") ?? line
+
+# The lines of `s`: the parts between line endings, `\n` or `\r\n`,
+# without them. A line ending at the end of `s` ends the last line
+# rather than starting an empty one, so "" has no lines. A `\r` not
+# followed by `\n` is part of its line.
+pub fun lines(s: ?String) -> Lines
+  Lines(rest: s)
+
+# The words of a `?String`, which `words` gives, in order:
+# `for word in text.words(s)`.
+pub obj Words
+  rest: ?String
+
+  # The next word, or `none` after the last.
+  pub fun next(!self) -> (?String)?
+    s = trim_start(self.rest)
+    return none if s.len == 0
+    end = 0
+    while end < s.len and not is_space(s[end])
+      end += 1
+    self.rest = s[end..]
+    s[..end]
+
+# The words of `s`: the nonempty runs of bytes between ASCII whitespace.
+pub fun words(s: ?String) -> Words
+  Words(rest: s)
+
+# ---- Chars -------------------------------------------------------------
+
+# The chars of a `?String`, which `chars` gives, in order:
+# `for c in text.chars(s)`.
+pub obj Chars
+  rest: ?String
+
+  # The next char, or `none` after the last.
+  pub fun next(!self) -> (?String)?
+    return none if self.rest.len == 0
+    end = char_end(self.rest, 0)
+    c = self.rest[..end]
+    self.rest = self.rest[end..]
+    c
+
+# The chars of `s`, each a `?String` viewing its bytes in `s`.
+pub fun chars(s: ?String) -> Chars
+  Chars(rest: s)
+
+# The first `n` chars of `s`, or all of `s` if it has fewer. Panics when
+# `n` is negative.
+pub fun first_chars(s: ?String, n: Int) -> ?String
+  s[..first_chars_end(s, n)]
+
+# The last `n` chars of `s`, or all of `s` if it has fewer. Panics when
+# `n` is negative.
+pub fun last_chars(s: ?String, n: Int) -> ?String
+  s[last_chars_start(s, n)..]
+
+# ---- Parsing -------------------------------------------------------------
+
+# `true` for "true" and `false` for "false"; fails with
+# `ParseError.invalid` for any other `?String`.
+pub fun parse_bool(s: ?String) -> Bool!
+  return true if s == "true"
+  return false if s == "false"
+  return ParseError.invalid
+
+# `s` as an `Int` in base `base`, 2 to 36 (10 by default): an optional
+# sign, `+` or `-`, then one or more digits, letters `a` to `z` in
+# either case standing for 10 to 35, and nothing else: no prefix such as
+# `0x`, and no `_`. Fails with `ParseError.invalid` when `s` is not
+# written so, and `ParseError.overflow` when its value is not an `Int`.
+# Panics when `base` is not between 2 and 36.
+pub fun parse_int(s: ?String, base: Int = 10) -> Int!
+  if base < 2 or base > 36
+    bad_base("text.parse_int")
+  parse_radix(s, base)!
+
+# `n` written in base `base`, 2 to 36 (10 by default): a `-` for a
+# negative number, then the digits without leading zeros, `0` for zero,
+# with the letters `a` to `z` for 10 to 35 (`A` to `Z` when `upper`).
+# Panics when `base` is not between 2 and 36.
+pub fun format_int(n: Int, base: Int = 10, upper: Bool = false) -> String
+  if base < 2 or base > 36
+    bad_base("text.format_int")
+  # The digits, written backward from the end: 64 hold Int.min in base 2.
+  buf = [64 of U8(0)]
+  i = buf.len
+  # The magnitude, unsigned, which holds Int.min's.
+  rest = U64.wrap(0 -% n) if n < 0 else U64(n)
+  if base == 10
+    # Two digits a step: `rest` is `100 * q` plus the pair's value.
+    while rest >= 100
+      q = rest / 100
+      p = Int(rest - q * 100) * 2
+      i -= 2
+      buf[i] = PAIRS[p]
+      buf[i + 1] = PAIRS[p + 1]
+      rest = q
+    if rest >= 10
+      i -= 2
+      buf[i] = PAIRS[Int(rest) * 2]
+      buf[i + 1] = PAIRS[Int(rest) * 2 + 1]
+    else
+      i -= 1
+      buf[i] = U8(rest) + 48
+  else
+    digits = UPPER_DIGITS if upper else LOWER_DIGITS
+    b = U64(base)
+    while true
+      q = rest / b
+      i -= 1
+      buf[i] = digits[Int(rest - q * b)]
+      rest = q
+      break if rest == 0
+  out = String()
+  !out.reserve(buf.len - i + 1)
+  !out.push(45) if n < 0
+  for k in i..buf.len
+    !out.push(buf[k])
+  out
+
+LOWER_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+UPPER_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# "00" to "99": the two digits of `r` at `2 * r`.
+PAIRS = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899"
+
+# The Levenshtein distance between `a` and `b`: the fewest insertions,
+# deletions, and substitutions of a rune that turn one into the other. A
+# byte that does not begin a well-formed UTF-8 sequence is one rune, equal
+# only to the same byte.
+# `row` is scratch space, grown to hold one cell per rune of `b` plus
+# one: pass the same `row` to many calls, and nothing allocates once it
+# has grown. With `max >= 0` the search stops as soon as the distance is
+# known to exceed `max`, and the result is `max + 1`: use it where only
+# near matches matter.
+pub fun edit_distance(a: ?String, b: ?String, row: !List[Int], max: Int = -1) -> Int
+  m = utf8.rune_count(b)
+  n = utf8.rune_count(a)
+  if max >= 0 and (n - m > max or m - n > max)
+    return max + 1
+  while row.len > m + 1
+    _ = !row.pop()
+  while row.len < m + 1
+    !row.push(0)
+  for k in 0..m + 1
+    row[k] = k
+  i = 0
+  y = 0
+  while i < a.len
+    da = utf8.rune_after(a, i)
+    ra = rune_key(da, a[i])
+    i += da.size
+    y += 1
+    diag = row[0]
+    row[0] = y
+    low = y
+    j = 0
+    x = 0
+    while j < b.len
+      db = utf8.rune_after(b, j)
+      rb = rune_key(db, b[j])
+      j += db.size
+      x += 1
+      above = row[x]
+      best = diag + (0 if ra == rb else 1)
+      best = above + 1 if above + 1 < best else best
+      best = row[x - 1] + 1 if row[x - 1] + 1 < best else best
+      row[x] = best
+      diag = above
+      low = best if best < low else low
+    if max >= 0 and low > max
+      return max + 1
+  d = row[m]
+  max + 1 if max >= 0 and d > max else d
+
+# The rune `d`, read at a byte `first`, or 0x110000 plus `first` when `d`
+# is a bad byte read as `utf8.REPLACEMENT`, so it equals only the same
+# byte.
+fun rune_key(d: utf8.Decoded, first: U8) -> Int
+  return 0x110000 + Int(first) if d.size == 1 and first >= 0x80
+  d.rune
+
+# ---- Bytes ---------------------------------------------------------------
+
+# Whether `b` is an ASCII digit, `0` to `9`.
+pub fun is_digit(b: U8) -> Bool
+  b >= 48 and b <= 57
+
+# Whether `b` is an ASCII letter, `a` to `z` or `A` to `Z`.
+pub fun is_alpha(b: U8) -> Bool
+  (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+
+# Whether `b` is ASCII whitespace: a space, tab, line feed, vertical
+# tab, form feed, or carriage return.
+pub fun is_space(b: U8) -> Bool
+  b == 32 or (b >= 9 and b <= 13)
+
+# `b` in upper case when it is an ASCII lower-case letter, else `b`.
+pub fun to_upper(b: U8) -> U8
+  b - 32 if b >= 97 and b <= 122 else b
+
+# `b` in lower case when it is an ASCII upper-case letter, else `b`.
+pub fun to_lower(b: U8) -> U8
+  b + 32 if b >= 65 and b <= 90 else b
+
+extern zig "text.zig"
+  # Panics: `split`'s separator is empty.
+  sub empty_separator()
+
+  # The index of the first occurrence of `pat` in `s`, or `none`; 0 when
+  # `pat` is "".
+  pub fun find(s: ?String, pat: ?String) -> Int?
+  # The index of the last occurrence of `pat` in `s`, or `none`;
+  # `s.len` when `pat` is "".
+  pub fun find_last(s: ?String, pat: ?String) -> Int?
+  # How many times `pat` occurs in `s`, counting from the left without
+  # overlaps: `count("aaaa", "aa")` is 2. For "" it is `s.len + 1`, the
+  # places between and around the bytes.
+  pub fun count(s: ?String, pat: ?String) -> Int
+
+  # `s` as an `Int` in base `base`, 2 to 36: see `parse_int`.
+  fun parse_radix(s: ?String, base: Int) -> Int!
+  # `s` as a `Float`: an optional sign, then digits with an optional
+  # `.` and fraction (one side of the `.` may be empty) and an optional
+  # exponent (`e` or `E`, an optional sign, and digits), or `inf`,
+  # `infinity`, or `nan` in any case. The nearest Float to the value;
+  # fails with `ParseError.invalid` when `s` is not written so, and
+  # `ParseError.overflow` when its magnitude is beyond `Float.max`.
+  pub fun parse_float(s: ?String) -> Float!
+
+  # Panics: a base is not between 2 and 36.
+  sub bad_base(who: ?String)
+
+  # The order of `a` and `b` by their bytes, as `<` orders them: -1
+  # when `a` sorts first, 1 when `b` does, and 0 when they are equal.
+  pub fun compare(a: ?String, b: ?String) -> Int
+
+extern zig "grapheme.zig"
+  # How many chars `s` holds.
+  pub fun char_count(s: ?String) -> Int
+  # The char boundary at or before byte `i`: `i` itself when a char
+  # starts there or `i` is `s.len`, else the start of the char `i` is
+  # inside. `s[..text.char_boundary(s, n)]` is the most of `s` that fits
+  # in `n` bytes without cutting a char. Panics unless `0 <= i <= s.len`.
+  pub fun char_boundary(s: ?String, i: Int) -> Int
+  # The byte where the char that starts at byte `i` ends.
+  fun char_end(s: ?String, i: Int) -> Int
+  # The bytes the first `n` chars of `s` take.
+  fun first_chars_end(s: ?String, n: Int) -> Int
+  # The byte where the last `n` chars of `s` start.
+  fun last_chars_start(s: ?String, n: Int) -> Int

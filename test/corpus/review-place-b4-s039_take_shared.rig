@@ -1,0 +1,6 @@
+obj P
+  o: (?String)?
+
+sub main()
+  h = *P(o: "a")
+  x = <h.o

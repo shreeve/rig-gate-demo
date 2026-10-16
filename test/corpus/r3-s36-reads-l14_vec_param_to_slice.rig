@@ -1,0 +1,9 @@
+fun sum(xs: []Int) -> Int
+  xs.len
+
+fun f(v: ?List[Int]) -> Int
+  sum(v)
+
+sub main()
+  v: List[Int] = List()
+  print(f(?v))

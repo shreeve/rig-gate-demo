@@ -1,0 +1,11 @@
+obj N
+  n: Int
+
+obj S
+  p: *N
+
+sub main()
+  o: S? = S(p: *N(n: 1))
+  print(o == none, o != none)
+  v: List[Int]? = none
+  print(v == none)

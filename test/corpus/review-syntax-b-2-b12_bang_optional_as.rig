@@ -1,0 +1,10 @@
+sub f(w: !String?)
+  s = ""
+  if w as r
+    s = r[1..]
+  w = none
+  print(s)
+
+sub main()
+  o: String? = String("hello")
+  f(!o)

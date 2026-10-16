@@ -1,0 +1,9 @@
+enum E
+  only
+
+obj W
+  a: E
+
+sub main()
+  w = W(a: .only)
+  print(w.a == .only)

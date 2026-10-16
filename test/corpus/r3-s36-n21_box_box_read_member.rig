@@ -1,0 +1,6 @@
+obj S
+  n: Int
+
+sub main()
+  b = ^^S(n: 4)
+  print(b.n)

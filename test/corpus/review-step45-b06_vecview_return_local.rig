@@ -1,0 +1,9 @@
+# return a List holding a view of a local
+fun mk() -> List[?String]
+  t = String("x")
+  v: List[?String] = List()
+  !v.push(?t)
+  <v
+
+sub main()
+  print(mk())

@@ -1,0 +1,10 @@
+obj Wrap[T]
+  item: T
+
+fun mk() -> Wrap[?List[Int]]
+  v = List[Int]()
+  Wrap(?v)
+
+sub main()
+  w = mk()
+  print(w)

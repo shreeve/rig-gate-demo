@@ -1,0 +1,7 @@
+# slice view of a List[Text] held, then push (must reject)
+sub main()
+  v: List[String] = List()
+  !v.push(String("a"))
+  s = ?v[..]
+  !v.push(String("b"))
+  print(s)

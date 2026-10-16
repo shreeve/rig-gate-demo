@@ -1,0 +1,8 @@
+obj H
+  log: Cell[List[Int]]
+
+sub f(x: !H, y: !H)
+  x.log = y.log
+
+sub main()
+  print(1)

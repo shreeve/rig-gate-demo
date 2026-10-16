@@ -1,0 +1,5 @@
+pub obj Wrap[T]
+  pub v: T
+
+pub obj Point
+  pub x: Int

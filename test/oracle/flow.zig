@@ -1,0 +1,809 @@
+//! The dataflow over the core: which vars are live (backward), which
+//! may be empty and which loans each var carries (forward, to a
+//! fixpoint), and the checks each op must pass. A loan is live where a
+//! var carrying it is live (Core: "a loan lasts until the last use of
+//! every view that carries it").
+
+const std = @import("std");
+const core = @import("core.zig");
+
+const VarId = core.VarId;
+const LoanId = core.LoanId;
+
+/// A set of small integers.
+const Bits = struct {
+    words: []u64,
+
+    fn init(a: std.mem.Allocator, n: usize) !Bits {
+        const w = try a.alloc(u64, (n + 63) / 64);
+        @memset(w, 0);
+        return .{ .words = w };
+    }
+
+    fn clone(self: Bits, a: std.mem.Allocator) !Bits {
+        return .{ .words = try a.dupe(u64, self.words) };
+    }
+
+    fn set(self: Bits, i: usize) void {
+        self.words[i / 64] |= @as(u64, 1) << @intCast(i % 64);
+    }
+
+    fn unset(self: Bits, i: usize) void {
+        self.words[i / 64] &= ~(@as(u64, 1) << @intCast(i % 64));
+    }
+
+    fn has(self: Bits, i: usize) bool {
+        return self.words[i / 64] & (@as(u64, 1) << @intCast(i % 64)) != 0;
+    }
+
+    fn clear(self: Bits) void {
+        @memset(self.words, 0);
+    }
+
+    fn copyFrom(self: Bits, other: Bits) void {
+        @memcpy(self.words, other.words);
+    }
+
+    /// self |= other; whether anything changed.
+    fn merge(self: Bits, other: Bits) bool {
+        var changed = false;
+        for (self.words, other.words) |*x, y| {
+            const n = x.* | y;
+            if (n != x.*) changed = true;
+            x.* = n;
+        }
+        return changed;
+    }
+};
+
+/// What is known before an op: the vars that may be empty, and the
+/// loans each var may carry.
+const State = struct {
+    empty: Bits,
+    holds: []Bits,
+
+    fn init(a: std.mem.Allocator, nv: usize, nl: usize) !State {
+        const holds = try a.alloc(Bits, nv);
+        for (holds) |*h| h.* = try Bits.init(a, nl);
+        return .{ .empty = try Bits.init(a, nv), .holds = holds };
+    }
+
+    fn clone(self: State, a: std.mem.Allocator) !State {
+        const holds = try a.alloc(Bits, self.holds.len);
+        for (holds, self.holds) |*h, s| h.* = try s.clone(a);
+        return .{ .empty = try self.empty.clone(a), .holds = holds };
+    }
+
+    fn merge(self: State, other: State) bool {
+        var changed = self.empty.merge(other.empty);
+        for (self.holds, other.holds) |h, o| changed = h.merge(o) or changed;
+        return changed;
+    }
+};
+
+const Checker = struct {
+    a: std.mem.Allocator,
+    f: *core.Func,
+    nv: usize,
+    nl: usize,
+    live_out: []Bits,
+    /// The read loan each write loan reads as, in what a call returns.
+    twins: []?LoanId,
+    /// For a loan on a part of what a write view views (`deref`, with a
+    /// path): the same loan on all of it. Defining the view anew points
+    /// it at another value, which the path does not describe.
+    wholes: []?LoanId = &.{},
+    /// Scratch: an op's flow before its write loans are read only.
+    full: Bits = undefined,
+    /// Scratch: what an op stores (`gains`, `through`), before and after
+    /// its write loans are read only; and `take`'s loans.
+    stored: Bits = undefined,
+    stored_full: Bits = undefined,
+    stored_wo: Bits = undefined,
+    stored_full_wo: Bits = undefined,
+    seen: Bits = undefined,
+    work: Bits = undefined,
+    /// Scratch: what each of a call's several results carries.
+    part_flows: []Bits = &.{},
+    /// Each write-view parameter's `held` loan.
+    held_of: []?LoanId = &.{},
+    /// The write-view parameter each local write view was moved or
+    /// copied out of, through any temporaries (`viewsOf`).
+    view_of: []?VarId = &.{},
+    /// Scratch for `untake`: the vars the taken place is reached through.
+    chain: []bool = &.{},
+    finding: ?core.Finding = null,
+
+    fn report(self: *Checker, rule: core.Rule, pos: u32, comptime fmt: []const u8, args: anytype) !void {
+        if (self.finding != null) return;
+        self.finding = .{ .rule = rule, .pos = pos, .reason = try self.a.print(fmt, args) };
+    }
+
+    fn name(self: *Checker, v: VarId) []const u8 {
+        return self.f.vars.items[v].name;
+    }
+
+    // ---- liveness -------------------------------------------------------
+
+    /// live-before from live-after, across one op.
+    fn liveStep(self: *Checker, op: core.Op, live: Bits) void {
+        if (op.def) |d| live.unset(d);
+        for (op.parts) |p| live.unset(p.v);
+        if (op.kill) |k| {
+            live.unset(k);
+            // A user `drop` body reads what the value views; any other
+            // drop only releases memory, and uses no view (Core s6).
+            if (self.f.vars.items[k].drop_reads) live.set(k);
+        }
+        for (op.reads) |v| live.set(v);
+        for (op.moves) |v| live.set(v);
+        for (op.uses) |v| live.set(v);
+        for (op.keep) |v| live.set(v);
+    }
+
+    fn liveness(self: *Checker) !void {
+        const blocks = self.f.blocks.items;
+        self.live_out = try self.a.alloc(Bits, blocks.len);
+        const live_in = try self.a.alloc(Bits, blocks.len);
+        for (self.live_out, live_in) |*o, *i| {
+            o.* = try Bits.init(self.a, self.nv);
+            i.* = try Bits.init(self.a, self.nv);
+        }
+        const tmp = try Bits.init(self.a, self.nv);
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var bi = blocks.len;
+            while (bi > 0) {
+                bi -= 1;
+                const b = blocks[bi];
+                for (b.succs.items) |s| changed = self.live_out[bi].merge(live_in[s]) or changed;
+                tmp.copyFrom(self.live_out[bi]);
+                var oi = b.ops.items.len;
+                while (oi > 0) {
+                    oi -= 1;
+                    self.liveStep(b.ops.items[oi], tmp);
+                }
+                changed = live_in[bi].merge(tmp) or changed;
+            }
+        }
+    }
+
+    // ---- loans ----------------------------------------------------------
+
+    /// The loans an op hands to what it defines (Core: one lend makes one
+    /// loan, which every copy of the view carries).
+    /// A call's result, and what it stores, carry the loans of only some
+    /// of what it reads and takes (`skip` the others, Core s7).
+    fn flowOf(self: *Checker, op: core.Op, st: State, out: Bits, skip: []const VarId, with_loan: bool) void {
+        out.clear();
+        for (op.reads) |v| if (std.mem.findScalar(VarId, skip, v) == null) {
+            _ = out.merge(st.holds[v]);
+        };
+        for (op.moves) |v| if (std.mem.findScalar(VarId, skip, v) == null) {
+            _ = out.merge(st.holds[v]);
+        };
+        if (op.carry) {
+            for (self.f.loans.items, 0..) |l, li| {
+                if (l.pointer and !l.external) out.unset(li);
+            }
+        }
+        if (op.unpoint) {
+            const extra = self.full;
+            extra.clear();
+            for (self.f.loans.items, 0..) |l, li| {
+                if (!out.has(li) or !l.pointer or l.external) continue;
+                out.unset(li);
+                _ = extra.merge(st.holds[l.root]);
+            }
+            _ = out.merge(extra);
+        }
+        if (op.untake) self.untake(op.reads[0], op.def, st, out);
+        if (op.loan) |l| if (with_loan) out.set(l);
+    }
+
+    /// What a value taken out of a place reached from `root` carries:
+    /// what the place's value held. A write loan in `out` is a view on
+    /// the path to the place, never in the value, which holds no write
+    /// view (Core §5); it stands for what its target holds. The caller's
+    /// loan on a write-view parameter on the path stands for its `held`
+    /// twin. A value that may hold a write view keeps every loan.
+    fn untake(self: *Checker, root: VarId, def: ?VarId, st: State, out: Bits) void {
+        if (def) |d| if (self.f.vars.items[d].holds_writes) return;
+        @memset(self.chain, false);
+        self.chain[root] = true;
+        var changed = true;
+        var rounds: usize = 0;
+        while (changed and rounds <= self.nl) : (rounds += 1) {
+            changed = false;
+            for (self.f.loans.items, 0..) |l, li| {
+                if (!out.has(li) or l.external or l.mode != .write) continue;
+                out.unset(li);
+                _ = out.merge(st.holds[l.root]);
+                self.chain[l.root] = true;
+                changed = true;
+            }
+        }
+        for (self.f.loans.items, 0..) |l, li| {
+            if (!out.has(li) or !l.external or l.held or !self.chain[l.root]) continue;
+            const held = self.held_of[l.root] orelse continue;
+            out.unset(li);
+            out.set(held);
+        }
+    }
+
+    /// Add the flowing loans a var can carry: none if its type holds no
+    /// view, and only those it keeps (`core.Func.keeps`): a `?String` read
+    /// out through a `?String` carries the `?String`'s loans, not the loan
+    /// on the place it was read from.
+    fn take(self: *Checker, v: VarId, st: State, flow: Bits) void {
+        const vr = self.f.vars.items[v];
+        if (!vr.holds_views) return;
+        // A loan the var does not keep stands for the loans its place's
+        // var holds now, judged the same way.
+        const seen = self.seen;
+        seen.clear();
+        var pending = true;
+        const work = self.work;
+        work.copyFrom(flow);
+        while (pending) {
+            pending = false;
+            for (self.f.loans.items, 0..) |l, li| {
+                if (!work.has(li) or seen.has(li)) continue;
+                seen.set(li);
+                if (l.external or self.f.keeps(v, li)) {
+                    st.holds[v].set(li);
+                } else if (l.root != v and work.merge(st.holds[l.root])) pending = true;
+            }
+        }
+    }
+
+    /// A var a call or store may have left a view in takes the flowing
+    /// loans, but never a loan on itself.
+    fn gain(self: *Checker, g: VarId, st: State, flow: Bits) void {
+        self.gainOnly(g, st, flow);
+        self.toCaller(g, st, flow, false);
+    }
+
+    /// What is stored in a var that took a write-view parameter's view
+    /// (`x = <w`, `if <w as x`) is stored in what the caller lent: the
+    /// parameter, which the caller reads after the return, takes it too
+    /// (Core s7).
+    fn toCaller(self: *Checker, v: VarId, st: State, flow: Bits, by_take: bool) void {
+        const p = self.view_of[v] orelse return;
+        if (by_take) self.take(p, st, flow) else self.gainOnly(p, st, flow);
+    }
+
+    fn gainOnly(self: *Checker, g: VarId, st: State, flow: Bits) void {
+        const vr = self.f.vars.items[g];
+        if (!vr.holds_views) return;
+        for (self.f.loans.items, 0..) |l, li| {
+            if (!flow.has(li) or (!l.external and l.root == g)) continue;
+            if (!vr.holds_pointers and !(l.external or self.f.keeps(g, li))) continue;
+            st.holds[g].set(li);
+        }
+    }
+
+    /// Whether `v` is a write-view parameter: what it views is the
+    /// caller's, which holds what the body stored there after `v` itself
+    /// is moved on (`x = <w`).
+    fn callerReaches(self: *Checker, v: VarId) bool {
+        const vr = self.f.vars.items[v];
+        return vr.param and vr.kind == .write_view;
+    }
+
+    /// `v` is defined anew: a loan another var still holds on a part of
+    /// what it viewed is on all of it from here (`wholes`).
+    fn widen(self: *Checker, v: VarId, st: State) void {
+        for (self.wholes, 0..) |whole, li| {
+            const w = whole orelse continue;
+            if (self.f.loans.items[li].root != v) continue;
+            for (st.holds) |h| if (h.has(li)) {
+                h.unset(li);
+                h.set(w);
+            };
+        }
+    }
+
+    /// Replace each write loan in a flow by its read twin.
+    fn readOnly(self: *Checker, flow: Bits) void {
+        for (self.twins, 0..) |twin, li| {
+            if (twin) |t| if (flow.has(li)) {
+                flow.unset(li);
+                flow.set(t);
+            };
+        }
+    }
+
+    /// Apply an op to the state (after its checks).
+    fn transfer(self: *Checker, op: core.Op, st: State, flow: Bits) void {
+        if (op.def) |d| self.widen(d, st);
+        self.flowOf(op, st, flow, op.no_result, op.result_loan);
+        const stored = self.stored;
+        self.flowOf(op, st, stored, op.no_store, op.store_loan);
+        // What a call hands back or stores is a read view of what it was
+        // lent to write, unless it may itself be or hold a write view
+        // (Core s7: a result that holds no write view carries its loans
+        // as read loans, even of an argument lent to write), and a write
+        // view pushed into a List of them stays one (Core §5).
+        const stored_full = self.stored_full;
+        stored_full.copyFrom(stored);
+        if (op.what == .call) {
+            self.readOnly(stored);
+            const wants_write = if (op.def) |d| self.f.vars.items[d].kind == .write_view or self.f.vars.items[d].holds_writes else false;
+            if (!wants_write) self.readOnly(flow);
+        }
+        // Each of several results carries what its own type could view,
+        // as a read loan unless it may itself be or hold a write view.
+        for (op.parts, self.part_flows[0..op.parts.len]) |p, pf| {
+            self.widen(p.v, st);
+            self.flowOf(op, st, pf, p.no_result, p.result_loan);
+            const pv = self.f.vars.items[p.v];
+            if (op.what == .call and !(pv.kind == .write_view or pv.holds_writes)) self.readOnly(pf);
+        }
+        // What the receiver itself takes leaves out the call's own lend of
+        // it: a callee cannot store a view of `self` through `self`, whose
+        // write it is (the compiler rejects `!self.w.push(?self.n)`). In
+        // another `!` argument it may store that view, which keeps the
+        // receiver lent while the argument holds it (SPEC "Second-class
+        // views").
+        const stored_wo = self.stored_wo;
+        const stored_full_wo = self.stored_full_wo;
+        stored_wo.copyFrom(stored);
+        stored_full_wo.copyFrom(stored_full);
+        if (op.what == .call) if (op.loan) |own| {
+            stored_full_wo.unset(own);
+            stored_wo.unset(own);
+            if (self.twins[own]) |tw| stored_wo.unset(tw);
+        };
+        // A call may store what it was handed in what it was lent to
+        // write (Core s6, SPEC §7 "Second-class views"), before its
+        // result is handed back: a loan its result does not keep stands
+        // for what its place holds after the call (`take`).
+        for (op.gains) |g| {
+            const own_recv = op.recv_root != null and op.recv_root.? == g;
+            const sf = if (own_recv) stored_full_wo else stored_full;
+            const sr = if (own_recv) stored_wo else stored;
+            self.gain(g, st, if (self.f.vars.items[g].holds_writes) sf else sr);
+        }
+        // What a write view stores into, or lets a call store into, is
+        // what its write loans are on.
+        for (op.through) |t| {
+            const own_recv = (op.recv_view != null and op.recv_view.? == t) or (op.recv_root != null and op.recv_root.? == t);
+            const sf = if (own_recv) stored_full_wo else stored_full;
+            const sr = if (own_recv) stored_wo else stored;
+            for (self.f.loans.items, 0..) |l, li| {
+                if (!st.holds[t].has(li) or l.external or l.mode == .read or !l.stores_views) continue;
+                self.gain(l.root, st, if (self.f.vars.items[l.root].holds_writes) sf else sr);
+            }
+        }
+        for (op.moves) |v| {
+            st.empty.set(v);
+            // What the caller lent keeps what was stored in it.
+            if (!self.callerReaches(v)) st.holds[v].clear();
+        }
+        if (op.def) |d| {
+            st.holds[d].clear();
+            self.take(d, st, flow);
+            st.empty.unset(d);
+        }
+        for (op.parts, self.part_flows[0..op.parts.len]) |p, pf| {
+            st.holds[p.v].clear();
+            self.take(p.v, st, pf);
+            st.empty.unset(p.v);
+        }
+        if (op.weak) |w| {
+            self.take(w, st, flow);
+            self.toCaller(w, st, flow, true);
+        }
+        if (op.kill) |k| {
+            st.empty.set(k);
+            st.holds[k].clear();
+        }
+    }
+
+    // ---- checks ---------------------------------------------------------
+
+    /// Whether an access conflicts with a loan a var carries: on the same
+    /// var, at places neither of which is beside the other (Core s5:
+    /// `p` and `p.a`, `p.a` and `p.a.b`, but not `p.a` and `p.b`).
+    fn conflicts(l: core.Loan, li: LoanId, acc: core.Access) bool {
+        if (l.external or l.root != acc.root) return false;
+        if (acc.except) |e| if (e == li) return false;
+        if (disjoint(l.path, acc.path)) return false;
+        return switch (acc.kind) {
+            .read => l.mode == .write,
+            .reserve => l.mode != .read,
+            .write, .whole => true,
+        };
+    }
+
+    /// Whether `op` stores in var `v`: its assignment target, a var it
+    /// gains, or what a view it stores through holds a write loan on.
+    fn storesInto(self: *Checker, op: core.Op, st: State, v: VarId) bool {
+        if (op.weak != null and op.weak.? == v) return true;
+        if (std.mem.findScalar(VarId, op.gains, v) != null) return true;
+        for (op.through) |t| for (self.f.loans.items, 0..) |l, li| {
+            if (st.holds[t].has(li) and !l.external and l.mode != .read and l.root == v) return true;
+        };
+        return false;
+    }
+
+    /// Whether loan `li` is a lend `op`'s store goes in by: the call's own
+    /// lend of its receiver, or a write loan a view it stores through
+    /// holds; or the read twin of one, as a call's stores carry them.
+    fn goesInBy(self: *Checker, op: core.Op, st: State, li: LoanId) bool {
+        for (self.f.loans.items, 0..) |l, x| {
+            const is = x == li or (x < self.twins.len and self.twins[x] != null and self.twins[x].? == li);
+            if (!is) continue;
+            if (op.what == .call and op.loan != null and op.loan.? == x) return true;
+            if (l.mode == .read or l.external) continue;
+            for (op.through) |t| if (st.holds[t].has(x)) return true;
+        }
+        return false;
+    }
+
+    fn disjoint(x: []const core.Step, y: []const core.Step) bool {
+        const n = @min(x.len, y.len);
+        for (x[0..n], y[0..n]) |s, t| {
+            if (s == .elem or t == .elem) return false;
+            if (!std.mem.eql(u8, s.field, t.field)) return true;
+        }
+        return false;
+    }
+
+    fn checkOp(self: *Checker, op: core.Op, st: State, live_after: Bits) !void {
+        // C1 (s1, s2): every var read, moved, or used holds a value.
+        const groups = [_][]const VarId{ op.reads, op.moves, op.uses };
+        for (groups) |g| for (g) |v| {
+            if (st.empty.has(v)) {
+                const vr = self.f.vars.items[v];
+                if (vr.hidden) {
+                    try self.report(.C1, op.pos, "use of a value that was moved", .{});
+                } else try self.report(.C1, op.pos, "use of `{s}` after move", .{vr.name});
+                return;
+            }
+        };
+        // C4 (s5, s6): an access meets no live loan it conflicts with.
+        if (op.access) |acc| {
+            const live = try live_after.clone(self.a);
+            if (op.def) |d| live.unset(d);
+            for (op.parts) |p| live.unset(p.v);
+            for (op.reads) |v| live.set(v);
+            for (op.moves) |v| live.set(v);
+            for (op.uses) |v| live.set(v);
+            for (0..self.nv) |u| {
+                if (!live.has(u)) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[u].has(li)) continue;
+                    if (op.loan != null and op.loan.? == li) continue;
+                    if (!conflicts(l, @intCast(li), acc)) continue;
+                    try self.report(.C4, op.pos, "cannot {s} `{s}` while a {s} loan of it is live (L{d}, carried by `{s}`#{d})", .{
+                        switch (acc.kind) {
+                            .read => "read",
+                            .reserve, .write => "write",
+                            .whole => "move",
+                        },
+                        self.name(acc.root),
+                        if (l.mode == .read) "read" else "write",
+                        li,
+                        self.name(@intCast(u)),
+                        u,
+                    });
+                    return;
+                }
+            }
+        }
+        // C4 (s5): of several results, one that keeps a lend to write is
+        // the only view of what it views: no other result carries that
+        // lend.
+        if (op.parts.len > 1) {
+            for (op.parts, self.part_flows[0..op.parts.len]) |p, pf| {
+                self.flowOf(op, st, pf, p.no_result, p.result_loan);
+                const pv = self.f.vars.items[p.v];
+                if (!(pv.kind == .write_view or pv.holds_writes)) self.readOnly(pf);
+            }
+            for (op.parts, self.part_flows[0..op.parts.len], 0..) |p, pf, i| {
+                if (!self.f.vars.items[p.v].holds_views) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!pf.has(li) or l.external or l.mode != .write or !self.f.keeps(p.v, li)) continue;
+                    const twin = self.twins[li];
+                    for (op.parts, self.part_flows[0..op.parts.len], 0..) |q, qf, j| {
+                        if (j == i or !self.f.vars.items[q.v].holds_views) continue;
+                        const other = (qf.has(li) and self.f.keeps(q.v, li)) or (twin != null and qf.has(twin.?) and self.f.keeps(q.v, twin.?));
+                        if (!other) continue;
+                        try self.report(.C4, op.pos, "two results of one call view `{s}`, and one of them writes it", .{self.name(l.root)});
+                        return;
+                    }
+                }
+            }
+        }
+        // C9 (§5): a value never holds a view of itself. What an op
+        // stores in a var (an assignment's target; what a call may store
+        // in its write arguments and receiver, and in what their write
+        // loans are on) carries no loan on that var, but the lends the
+        // store goes in by: the call's own lend of its receiver, and the
+        // write loans the views it stores through hold.
+        if (op.weak != null or op.gains.len > 0 or op.through.len > 0) {
+            const stored = self.stored;
+            if (op.what == .call) {
+                self.flowOf(op, st, stored, op.no_store, op.store_loan);
+            } else self.flowOf(op, st, stored, op.no_result, op.result_loan);
+            for (self.f.loans.items, 0..) |l, li| {
+                if (!stored.has(li) or l.external) continue;
+                if (!self.storesInto(op, st, l.root) or self.goesInBy(op, st, @intCast(li))) continue;
+                try self.report(.C9, op.pos, "a value carrying a loan on `{s}` would be stored in `{s}`: a value never holds a view of itself", .{ self.name(l.root), self.name(l.root) });
+                return;
+            }
+        }
+        // C5 (s3, s6, §3): a var is not dropped while a loan of its own
+        // storage is live, on any path where it holds a value (a
+        // statement temporary one branch made).
+        if (op.kill) |k| {
+            for (0..self.nv) |u| {
+                if (!live_after.has(u) and !(u == k and self.f.vars.items[k].drop_reads)) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (l.external or l.deref or l.root != k or !st.holds[u].has(li)) continue;
+                    if (op.scope_end) {
+                        const vr = self.f.vars.items[k];
+                        if (vr.hidden)
+                            try self.report(.C5, op.pos, "a loan of a temporary outlives its statement", .{})
+                        else
+                            try self.report(.C5, op.pos, "`{s}` does not live long enough: a loan of it is still live", .{vr.name});
+                    } else try self.report(.C5, op.pos, "cannot drop `{s}` while a loan of it is live", .{self.name(k)});
+                    return;
+                }
+            }
+        }
+        // C8 (s9): an owned closure, a Cell, or a Signal takes no value
+        // that carries a loan.
+        if (op.no_loans) {
+            for (op.moves) |v| {
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[v].has(li)) continue;
+                    try self.report(.C8, op.pos, "a value carrying a loan of `{s}` would be stored where every handle reaches it; an owned closure, a Cell, or a Signal holds only values that carry no loan", .{self.name(l.root)});
+                    return;
+                }
+            }
+        }
+        // C6 (s7): what leaves the function views only what it was lent,
+        // or what lives for the whole program. What a closure captured
+        // to write outlives each call, so it keeps no view of what one
+        // call received (Core §7).
+        if (op.what == .ret) {
+            // A function that says what its result views views nothing
+            // else its caller lent it (Core s7).
+            if (self.f.from) |from| for (op.reads) |v| {
+                if (st.empty.has(v)) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[v].has(li) or !l.external) continue;
+                    const i = std.mem.findScalar(VarId, self.f.params.items, l.root) orelse continue;
+                    if (i < 64 and from & (@as(u64, 1) << @intCast(i)) != 0) continue;
+                    try self.report(.C6, op.pos, "a view of `{s}` leaves the function, whose `from` does not name it", .{self.name(l.root)});
+                    return;
+                }
+            };
+            // A function keeps a lent parameter only where its `keeps`
+            // names it: what its caller reaches through a write
+            // parameter holds no other lent parameter's loans.
+            if (self.f.keeps_named) |keeps| for (op.keep) |v| {
+                if (st.empty.has(v) and !self.callerReaches(v)) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[v].has(li) or !l.external or l.root == v) continue;
+                    const i = std.mem.findScalar(VarId, self.f.params.items, l.root) orelse continue;
+                    if (i >= 64) continue;
+                    const bit = @as(u64, 1) << @intCast(i);
+                    if (self.f.lent & bit == 0 or keeps & bit != 0) continue;
+                    try self.report(.C6, op.pos, "a view of `{s}` is kept in `{s}`, which its caller reaches, but `keeps` does not name it", .{ self.name(l.root), self.name(v) });
+                    return;
+                }
+            };
+            for (op.keep) |v| {
+                if (st.empty.has(v) or !self.f.vars.items[v].capture) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[v].has(li) or !l.call_only) continue;
+                    try self.report(.C6, op.pos, "a view of `{s}`, which lasts one call, is stored in what the closure captured", .{self.name(l.root)});
+                    return;
+                }
+            }
+            // What one call received is the caller's, which may outlive
+            // the closure: it keeps no view of what the closure captured
+            // (Core §7; the call does not pass those loans on).
+            for (op.keep) |v| {
+                if (st.empty.has(v) or !self.f.vars.items[v].call_only) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[v].has(li) or !self.f.vars.items[l.root].capture) continue;
+                    try self.report(.C6, op.pos, "a view of `{s}`, which the closure captured, is stored in what one call received", .{self.name(l.root)});
+                    return;
+                }
+            }
+            // A closure's result is handed out at every call: it views no
+            // place the closure captured to write (Core §7: only a
+            // captured read lend may be the closure's value).
+            for (op.reads) |v| {
+                if (st.empty.has(v)) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[v].has(li)) continue;
+                    const root = self.f.vars.items[l.root];
+                    if (!root.capture or root.kind != .write_view or l.held) continue;
+                    try self.report(.C6, op.pos, "a view of `{s}`, which the closure captured to write, leaves each call", .{root.name});
+                    return;
+                }
+            }
+            for ([_][]const VarId{ op.reads, op.keep }) |g| for (g) |v| {
+                if (st.empty.has(v)) continue;
+                for (self.f.loans.items, 0..) |l, li| {
+                    if (!st.holds[v].has(li) or l.external or l.deref) continue;
+                    try self.report(.C6, op.pos, "a view of `{s}` leaves the function, which was not lent it", .{self.name(l.root)});
+                    return;
+                }
+            };
+        }
+    }
+};
+
+/// The write-view parameter each local write view holds the view of,
+/// taken from it by a move or a copy, directly or through other locals:
+/// what is stored through such a local lands in what the caller lent.
+fn viewsOf(a: std.mem.Allocator, f: *const core.Func) ![]?VarId {
+    const out = try a.alloc(?VarId, f.vars.items.len);
+    @memset(out, null);
+    for (f.params.items) |p| {
+        const pv = f.vars.items[p];
+        if (pv.kind == .write_view and !pv.capture) out[p] = p;
+    }
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (f.blocks.items) |b| for (b.ops.items) |op| {
+            if (op.what != .move and op.what != .copy) continue;
+            const d = op.def orelse continue;
+            const dv = f.vars.items[d];
+            if (dv.kind != .write_view or dv.param or dv.capture or out[d] != null) continue;
+            const srcs = if (op.what == .move) op.moves else op.reads;
+            if (srcs.len != 1) continue;
+            if (out[srcs[0]]) |p| {
+                out[d] = p;
+                changed = true;
+            }
+        };
+    }
+    // A parameter is its own; only the locals are noted.
+    for (f.params.items) |p| out[p] = null;
+    return out;
+}
+
+pub fn check(a: std.mem.Allocator, f: *core.Func) !?core.Finding {
+    if (f.early) |e| return e;
+    // The caller's loan on each parameter that can carry one.
+    var entry_loans: std.ArrayList(struct { VarId, LoanId }) = .empty;
+    for (f.params.items) |p| {
+        if (!f.vars.items[p].holds_views) continue;
+        try f.loans.append(a, .{ .root = p, .path = &.{}, .mode = .read, .external = true, .call_only = f.vars.items[p].call_only, .pointer = false, .pos = 0 });
+        try entry_loans.append(a, .{ p, @intCast(f.loans.items.len - 1) });
+    }
+    // What the value each write-view parameter views holds: the caller's
+    // too, reached only by a value taken out through it (`untake`).
+    const held_of = try a.alloc(?LoanId, f.vars.items.len);
+    @memset(held_of, null);
+    for (f.params.items) |p| {
+        const pv = f.vars.items[p];
+        if (!pv.holds_views or pv.kind != .write_view) continue;
+        try f.loans.append(a, .{ .root = p, .path = &.{}, .mode = .read, .external = true, .call_only = pv.call_only, .held = true, .pointer = false, .pos = 0 });
+        held_of[p] = @intCast(f.loans.items.len - 1);
+    }
+    const n = f.loans.items.len;
+    const twins = try a.alloc(?LoanId, n);
+    for (twins, 0..) |*t, li| {
+        const l = f.loans.items[li];
+        t.* = null;
+        if (l.mode == .read or l.external) continue;
+        var twin = l;
+        twin.mode = .read;
+        try f.loans.append(a, twin);
+        t.* = @intCast(f.loans.items.len - 1);
+    }
+    // A loan on a part of what a write view views, and its read twin,
+    // each have one on all of it (`Checker.wholes`).
+    const m = f.loans.items.len;
+    const wholes = try a.alloc(?LoanId, m);
+    const origin = try a.alloc(LoanId, m);
+    for (origin, 0..) |*o, li| o.* = @intCast(li);
+    for (twins, 0..) |twin, li| if (twin) |t| {
+        origin[t] = @intCast(li);
+    };
+    for (wholes, 0..) |*w, li| {
+        const l = f.loans.items[li];
+        w.* = null;
+        if (!l.deref or l.external or l.path.len == 0) continue;
+        var whole = l;
+        whole.path = &.{};
+        try f.loans.append(a, whole);
+        w.* = @intCast(f.loans.items.len - 1);
+    }
+    // Each loan added here is kept as the lowering decided for the loan
+    // it derives from; a caller's loan is external.
+    if (f.keep.len > 0) {
+        const nv = f.vars.items.len;
+        const nl = f.loans.items.len;
+        const of = try a.alloc(LoanId, nl);
+        for (of, 0..) |*o, li| o.* = if (li < m) origin[li] else 0;
+        for (wholes, 0..) |w, li| if (w) |x| {
+            of[x] = origin[li];
+        };
+        const keep = try a.alloc(bool, nv * nl);
+        @memset(keep, true);
+        for (0..nv) |v| for (0..nl) |li| {
+            if (of[li] >= f.keep_loans) continue;
+            keep[v * nl + li] = f.keep[v * f.keep_loans + of[li]];
+        };
+        f.keep = keep;
+        f.keep_loans = nl;
+    }
+    var c: Checker = .{ .a = a, .f = f, .nv = f.vars.items.len, .nl = f.loans.items.len, .live_out = &.{}, .twins = twins, .wholes = wholes, .held_of = held_of, .chain = try a.alloc(bool, f.vars.items.len) };
+    try c.liveness();
+    c.view_of = try viewsOf(a, f);
+    c.full = try Bits.init(a, c.nl);
+    c.stored = try Bits.init(a, c.nl);
+    c.stored_full = try Bits.init(a, c.nl);
+    c.stored_wo = try Bits.init(a, c.nl);
+    c.stored_full_wo = try Bits.init(a, c.nl);
+    c.seen = try Bits.init(a, c.nl);
+    c.work = try Bits.init(a, c.nl);
+    var most_parts: usize = 0;
+    for (f.blocks.items) |b| for (b.ops.items) |op| {
+        most_parts = @max(most_parts, op.parts.len);
+    };
+    c.part_flows = try a.alloc(Bits, most_parts);
+    for (c.part_flows) |*pf| pf.* = try Bits.init(a, c.nl);
+
+    const blocks = f.blocks.items;
+    const in_states = try a.alloc(?State, blocks.len);
+    @memset(in_states, null);
+    var entry = try State.init(a, c.nv, c.nl);
+    for (0..c.nv) |v| entry.empty.set(v);
+    for (f.params.items) |p| entry.empty.unset(p);
+    for (entry_loans.items) |pl| entry.holds[pl[0]].set(pl[1]);
+    in_states[0] = entry;
+
+    const flow = try Bits.init(a, c.nl);
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (blocks, 0..) |b, bi| {
+            const in = in_states[bi] orelse continue;
+            const st = try in.clone(a);
+            for (b.ops.items) |op| c.transfer(op, st, flow);
+            for (b.succs.items) |s| {
+                if (in_states[s]) |*existing| {
+                    if (existing.merge(st)) changed = true;
+                } else {
+                    in_states[s] = try st.clone(a);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // The checks, on the fixpoint.
+    const live = try Bits.init(a, c.nv);
+    for (blocks, 0..) |b, bi| {
+        const in = in_states[bi] orelse continue;
+        const st = try in.clone(a);
+        // live-after for each op, from the block's end backward.
+        const after = try a.alloc(Bits, b.ops.items.len);
+        live.copyFrom(c.live_out[bi]);
+        var oi = b.ops.items.len;
+        while (oi > 0) {
+            oi -= 1;
+            after[oi] = try live.clone(a);
+            c.liveStep(b.ops.items[oi], live);
+        }
+        for (b.ops.items, 0..) |op, i| {
+            try c.checkOp(op, st, after[i]);
+            if (c.finding) |found| return found;
+            c.transfer(op, st, flow);
+        }
+    }
+    return null;
+}

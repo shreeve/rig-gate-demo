@@ -1,0 +1,6 @@
+obj S
+  n: Int
+
+sub main()
+  r = ?S(n: 1)
+  print(r.n)

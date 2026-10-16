@@ -1,0 +1,4 @@
+sub main()
+  v: List[Int] = List()
+  a = [<v]
+  print(a.len)

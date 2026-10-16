@@ -1,0 +1,7 @@
+obj R
+  name: ^Int
+
+sub main()
+  v: List[R] = List()
+  !v.push(R(name: ^1))
+  print(v.len)

@@ -1,0 +1,7 @@
+obj R
+  n: Int
+
+sub main()
+  b = ^R(n: 1)
+  r: ?R = ?b
+  print(r.n)

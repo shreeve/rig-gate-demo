@@ -1,0 +1,5 @@
+obj S
+  s: Cell[Signal[Int]]
+
+sub main()
+  print(1)

@@ -1,0 +1,14 @@
+pub enum Shape
+  circle(r: Float)
+  dot
+
+pub obj circle
+  r: Float
+
+pub obj W[T]
+  item: T
+
+pub type Km = circle
+
+pub obj Bag[T]
+  items: List[T]

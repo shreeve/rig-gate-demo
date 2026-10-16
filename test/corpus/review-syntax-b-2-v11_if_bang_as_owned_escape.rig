@@ -1,0 +1,10 @@
+fun keep(s: ?String) -> ?String
+  s
+
+sub main()
+  o: String? = String("hello")
+  s: ?String = ""
+  if !o as r
+    !r.add("!")
+    s = keep(?r[1..])
+  print(s)

@@ -1,0 +1,6 @@
+obj P
+  n: Int
+
+sub main()
+  v: List[*P] = List()
+  s = ?v[..]

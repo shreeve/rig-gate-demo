@@ -1,0 +1,6 @@
+sub main()
+  t = String("abc")
+  s = "lit"
+  s = ?t[..]
+  <t
+  print(s)

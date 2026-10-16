@@ -1,0 +1,8 @@
+pub obj P
+  pub n: Int
+
+  pub fun get(?self) -> Int
+    self.n
+
+  pub sub bump(!self)
+    self.n += 1

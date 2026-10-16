@@ -1,0 +1,6 @@
+obj P
+  c: Cell[Int]
+
+sub main()
+  h = *P(c: Cell(1))
+  h.c = Cell(2)

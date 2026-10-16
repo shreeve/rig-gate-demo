@@ -1,0 +1,3 @@
+pub obj Config
+  pub retries: Int = 3
+  pub verbose: Bool = false

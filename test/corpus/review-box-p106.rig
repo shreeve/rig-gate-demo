@@ -1,0 +1,7 @@
+obj R
+  n: Int
+
+sub main()
+  s = *R(n: 3)
+  b = ^~s
+  print(b)

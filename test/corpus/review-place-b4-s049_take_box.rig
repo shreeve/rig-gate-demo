@@ -1,0 +1,7 @@
+obj P
+  o: (?String)?
+
+sub main()
+  b = ^P(o: "a")
+  x = <b.o
+  print(x ?? "-")

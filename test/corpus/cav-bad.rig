@@ -1,0 +1,5 @@
+obj H
+  f: ?fun(Int) -> Int
+
+sub main()
+  print(1)

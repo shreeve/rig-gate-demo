@@ -1,0 +1,5 @@
+obj List
+  n: Int
+
+sub main()
+  print(1)

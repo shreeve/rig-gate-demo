@@ -1,0 +1,5 @@
+sub main()
+  x: String? = String("a")
+  r = ?x
+  y: String? = r
+  print(y)

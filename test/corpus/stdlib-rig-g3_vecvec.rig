@@ -1,0 +1,3 @@
+sub main()
+  grid: List[List[Int]] = List()
+  print(grid.len)

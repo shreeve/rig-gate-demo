@@ -1,0 +1,54 @@
+name: test
+
+# The whole suite on GitHub's runners, from a cold start: nightly and by
+# hand, and for a pull request from a fork. A pull request from a branch
+# of this repository is tested on burst instead (tools/gate), and its
+# merge checks come from gate.yml.
+#
+# The checks the ruleset on main requires are named test (ubuntu-latest)
+# and test (macos-latest). Here the jobs carry those names only for a
+# fork's pull request, where they report real results; on every other run
+# they are named cold (...), and on a pull request from this repository
+# they are skipped under that name. A skipped required check counts as
+# passing, so no job here is ever skipped under a required name.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer commit on a pull request cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ubuntu:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    uses: ./.github/workflows/shards.yml
+    with:
+      os: ubuntu-latest
+
+  macos:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    uses: ./.github/workflows/shards.yml
+    with:
+      os: macos-latest
+
+  # Each passes only when every shard of its system passed.
+  test-ubuntu:
+    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test (ubuntu-latest)' || 'cold (ubuntu-latest)' }}
+    needs: ubuntu
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.ubuntu.result }}" = success
+
+  test-macos:
+    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test (macos-latest)' || 'cold (macos-latest)' }}
+    needs: macos
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.macos.result }}" = success

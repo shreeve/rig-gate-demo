@@ -1,0 +1,6 @@
+obj String
+  n: Int
+
+sub main()
+  s = ?String(n: 1)
+  print(s.n)

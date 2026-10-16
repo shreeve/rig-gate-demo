@@ -1,0 +1,3 @@
+sub main()
+  c: Cell[List[?Int]] = Cell(List())
+  print(c.len)

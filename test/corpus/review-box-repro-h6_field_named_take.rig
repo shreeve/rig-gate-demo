@@ -1,0 +1,6 @@
+obj P
+  take: Int
+
+sub main()
+  b = ^P(take: 4)
+  print(b.take)

@@ -1,0 +1,10 @@
+pub obj Wrap[T]
+  v: T
+
+pub obj Two[T]
+  a: Wrap[T]
+  n: Int
+
+pub enum Opt[T]
+  some(value: T)
+  nothing

@@ -1,0 +1,6 @@
+sub main()
+  t = String("a b")
+  views: List[?String] = List()
+  !views.push(?t[..1])
+  !t.add("!")
+  print(views)

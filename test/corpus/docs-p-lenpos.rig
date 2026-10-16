@@ -1,0 +1,6 @@
+obj Meters
+  value: Float
+
+sub main()
+  m = Meters(3.5)
+  print(m, m.value)

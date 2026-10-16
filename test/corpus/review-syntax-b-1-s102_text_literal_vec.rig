@@ -1,0 +1,5 @@
+fun count(xs: []String) -> Int
+  xs.len
+
+sub main()
+  print(count([String("a"), String("b")][..]))

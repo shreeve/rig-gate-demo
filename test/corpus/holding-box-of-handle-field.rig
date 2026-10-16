@@ -1,0 +1,6 @@
+obj S
+  n: Int
+
+sub main()
+  bh: ^*S = ^*S(n: 2)
+  print(bh.n)

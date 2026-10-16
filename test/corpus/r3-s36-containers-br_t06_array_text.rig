@@ -1,0 +1,3 @@
+sub main()
+  a = [String("x"), String("y")]
+  print(a)

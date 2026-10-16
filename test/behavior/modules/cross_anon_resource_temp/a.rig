@@ -1,0 +1,5 @@
+pub obj Wrap
+  pub value: Int
+
+pub fun make_box() -> *Wrap
+  *Wrap(value: 7)

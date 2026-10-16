@@ -1,0 +1,5 @@
+fun f(v: List[Int] = List()) -> Int
+  v.len
+
+sub main()
+  print(f())

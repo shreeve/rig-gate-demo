@@ -1,0 +1,11 @@
+# A `Wrap[?String]` field types as String, so print formats it as text.
+
+obj Wrap[T]
+  value: T
+
+sub main()
+  b: Wrap[?String] = Wrap(value: "hi")
+  print(b.value)
+
+# expect:
+# hi

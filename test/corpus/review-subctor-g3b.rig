@@ -1,0 +1,7 @@
+obj Wrap[T]
+  item: T
+
+sub main()
+  v = List[Int]()
+  c = Cell(value: Wrap(item: ?v))
+  print(c)

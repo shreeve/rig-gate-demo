@@ -1,0 +1,9 @@
+obj P
+  x: Int
+
+fun f(p: ?P) -> Int
+  p.x
+
+sub main()
+  p = P(x: 1)
+  print(f(p))

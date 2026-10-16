@@ -1,0 +1,7 @@
+obj S
+  v: List[Int]
+
+sub main()
+  s = S(v: List())
+  t = <s
+  print(s.v.len, t.v.len)

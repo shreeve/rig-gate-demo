@@ -1,0 +1,5 @@
+sub main()
+  t = String("abc")
+  v: ?String = ?t[..]
+  xs: [2]Static = [v, "a"]
+  print(xs)

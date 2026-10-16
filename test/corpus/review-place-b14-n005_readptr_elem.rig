@@ -1,0 +1,10 @@
+obj Big
+  v: List[Int]
+
+sub main()
+  a = Big(v: List())
+  b = Big(v: List())
+  !b.v.push(1)
+  rs = [?a, ?a]
+  rs[1] = ?b
+  print(rs[0].v.len, rs[1].v.len, a.v.len)

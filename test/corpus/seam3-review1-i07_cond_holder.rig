@@ -1,0 +1,7 @@
+sub main()
+  v: List[Int] = List()
+  w: List[Int] = List()
+  !v.push(1)
+  b = ^?v if v.len > 0 else ^?w
+  <v
+  print(b.len)

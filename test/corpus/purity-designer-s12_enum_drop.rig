@@ -1,0 +1,7 @@
+enum E
+  a
+  drop(!self)
+    print("x")
+
+sub main()
+  print(1)

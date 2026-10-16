@@ -1,0 +1,10 @@
+sub main()
+  v: List[Int] = List()
+  !v.push(1)
+  bb = ^^?v
+  print(bb.len)
+  t = String("hi")
+  bt = ^^?t
+  print(bt, bt.len)
+  !v.push(2)
+  print(v.len)

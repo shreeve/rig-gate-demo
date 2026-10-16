@@ -1,0 +1,5 @@
+pub obj Wrap
+  pub v: List[Int]
+
+pub obj WV
+  pub b: !Wrap

@@ -1,0 +1,10 @@
+obj N
+  v: Int
+
+obj S
+  a: ^N?
+
+sub main()
+  s = S(a: ^N(v: 1))
+  b = <(s.a)
+  print(b, s)

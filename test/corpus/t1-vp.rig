@@ -1,0 +1,3 @@
+sub main()
+  v: List[Int] = List()
+  !v.insert(1, 3)

@@ -1,0 +1,8 @@
+obj R
+  n: Int
+
+sub main()
+  v: List[*R] = List()
+  !v.push(*R(n: 1))
+  for x in ?v
+    print(x.n)

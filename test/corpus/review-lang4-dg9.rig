@@ -1,0 +1,12 @@
+obj H
+  w: !^List[Int]
+
+fun inner(b: ?^List[Int]) -> ?List[Int]
+  ?b.value
+
+sub main()
+  b = ^List[Int]()
+  h = H(w: !b)
+  s = inner(?h.w)
+  h.w = ^List[Int]()
+  print(s)

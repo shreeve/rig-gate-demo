@@ -1,0 +1,3 @@
+sub main()
+  b = ^List[Int]()
+  !b.push(3)

@@ -1,0 +1,389 @@
+# Rig
+
+Rig is a small, fast systems language that aims for the readability of
+Python and Ruby and the memory safety of Rust, without a garbage
+collector. Blocks are indented, most code carries no annotations at
+all, and the places where ownership matters are marked by a handful of
+one-character sigils: `<x` moves, `?x` lends, `+x` clones, and `<x`
+alone on a line drops. The compiler checks every one of them, then lowers the program
+to [Zig](https://ziglang.org) 0.17, which does the optimizing, code
+generation, and linking.
+
+> **Status: early.** The core language and its ownership checker work
+> and are tested end to end, every program running leak-checked. The
+> standard library is small, there is no concurrency or async yet, and
+> the language will change: `main` is heading for v0.3.0, which renames
+> `Box`, `Vec`, `Text`, and `struct` (`tools/migrate-0.3.py` migrates
+> 0.2 programs). See [what works](#status).
+
+## A short tour
+
+[docs/QUICK.md](docs/QUICK.md) is a short guide to the sigils. Rig's
+whole ownership model fits on one page, [docs/CORE.md](docs/CORE.md).
+Read it before the syntax guide and the language reference, which give
+the details.
+New to Rig? [WELCOME.md](WELCOME.md) is the guide for programmers
+coming from Rust, Zig, C, Python, Ruby, JavaScript, or Go. Every
+example in this README is compiled and run by the test suite, and
+prints exactly the output shown under it.
+
+### `?` and `!`
+
+`?` and `!` each carry one idea, in four positions:
+
+| | before a value | before a type | after a type | after an expression |
+|---|---|---|---|---|
+| `?` "maybe, just look" | `?x` lend to read | `?T` read view | `T?` optional | `e?` pass `none` up |
+| `!` "for real, act" | `!x` lend to write | `!T` write view | `T!` can fail | `e!` pass a failure up |
+
+`!` means "act": write, or fail. As in Ruby's `sort!` and Scheme's
+`set!`, it marks something that changes things. Rig spells negation
+`not`, so `!` never means "not". Each sigil touches what it marks. A
+write call whose result is used goes in parentheses, `if
+(!set).insert(k)`, so its `!` never reads as "not".
+
+```rig
+error Stack
+  empty
+
+fun peek(v: ?List[Int]) -> Int?
+  return none if v.len == 0
+  v[v.len - 1]
+
+fun pop(v: !List[Int]) -> Int!
+  return Stack.empty if v.len == 0
+  (!v).pop() ?? 0
+
+fun next(v: ?List[Int]) -> Int?
+  peek(?v)? + 1
+
+fun drain(v: !List[Int]) -> Int!
+  pop(!v)! + pop(!v)!
+
+sub main()
+  v: List[Int] = List()
+  !v.push(1)
+  !v.push(2)
+  print(next(?v))
+  print(drain(!v) catch -1)
+  print(next(?v), drain(!v) catch -1)
+```
+
+```output
+3
+3
+none -1
+```
+
+`peek` lends `v` to read and gives an `Int?`; `next` passes its `none`
+up with `?`. `pop` lends `v` to write and gives an `Int!`; `drain`
+passes its failure up with `!`, which `catch` turns into `-1`.
+
+### Hello
+
+```rig
+sub main()
+  print("hello, rig")
+```
+
+```output
+hello, rig
+```
+
+`sub` declares a routine that returns nothing; `fun` declares one that
+returns a value. Every call has its parentheses.
+
+### Lending
+
+```rig
+obj User
+  name: ?String
+  visits: Int
+
+fun greeting(u: ?User) -> ?String
+  if u.visits > 1
+    "welcome back"
+  else
+    "hello"
+
+sub visit(u: !User)
+  u.visits += 1
+
+sub main()
+  ada = User(name: "Ada", visits: 1)
+  visit(!ada)
+  print(greeting(?ada), ada.name)
+```
+
+```output
+welcome back Ada
+```
+
+`?User` is a read view and `!User` a write view. The same sigil
+appears at the call site, `greeting(?ada)` and `visit(!ada)`, so you can
+see what a call may do to your value without looking it up. Views are
+checked, never counted: they cost nothing at run time. A value can have
+many readers or one writer at a time, never both.
+
+### Resources and drop
+
+```rig
+obj File
+  name: ?String
+
+  drop(!self)
+    print("closing", self.name)
+
+sub archive(f: File)
+  print("archiving", f.name)
+
+sub main()
+  log = File(name: "log.txt")
+  data = File(name: "data.csv")
+  archive(<log)
+  print("working")
+```
+
+```output
+archiving log.txt
+closing log.txt
+working
+closing data.csv
+```
+
+A `drop` body runs when a value is released. `<log` moves the file into
+`archive`, which now owns it and closes it on return; using `log`
+afterwards would be a compile error. `data` is still owned by `main` and
+is closed when `main` ends. There are no finalizers and no GC: cleanup
+happens at a point you can see.
+
+### Shared handles
+
+```rig
+obj Config
+  level: Int
+
+  drop(!self)
+    print("config released")
+
+sub main()
+  a = *Config(level: 3)
+  b = +a
+  <a
+  print("still here:", b.level)
+```
+
+```output
+still here: 3
+config released
+```
+
+`*Config(...)` puts the value in a reference-counted box, `+a` makes
+another owner (a visible refcount bump), and `<a` alone on a line moves
+`a` nowhere, so it drops that owner now. The
+value goes when its last owner does.
+
+### Generics
+
+```rig
+obj Pair[T, U]
+  first: T
+  second: U
+
+fun max[T](a: T, b: T) -> T
+  a if a > b else b
+
+sub main()
+  p = Pair(first: max(3, 7), second: max(2.5, 1.0))
+  print(p.first, p.second, max[Float](1, 2))
+```
+
+```output
+7 2.5 2.0
+```
+
+After a name, square brackets give compile-time arguments and
+parentheses give run-time ones. Indexing is the one familiar
+exception. Type arguments are usually
+inferred, and given in brackets when they are not: `max[Float](1, 2)`,
+`List[Int]()`. There are no trait bounds: each instance a program makes
+is checked against what the generic body does with `T`, and an error
+names the call, with a note at the line of the body.
+
+### Closures and a little reactivity
+
+```rig
+sub main()
+  clicks: *Signal[Int] = *Signal(0)
+  total: *Cell[Int] = *Cell(0)
+  !clicks.subscribe(*|~clicks, +total|
+    if *clicks as c
+      !total.set(total.get() + c.get())
+      print("clicks", c.get(), "total", total.get())
+  )
+  !clicks.set(1)
+  !clicks.set(2)
+```
+
+```output
+clicks 1 total 1
+clicks 2 total 3
+```
+
+A closure's bar list says how it holds each outer value: `+total`
+clones a handle, `<x` would move one in, and `~clicks` holds the signal
+weakly, so the signal and its subscriber don't keep each other alive.
+The `*` before the bars makes the closure *owned*, a heap handle the
+signal can keep. `Signal` is deliberately tiny; richer reactive
+libraries are written in Rig itself (see
+[examples/memo_canary.rig](examples/memo_canary.rig)).
+
+## The sigils
+
+| Sigil | In an expression | In a type |
+|---|---|---|
+| `<` | `<x` move `x`; as a statement, drop it now | |
+| `?` | `?x` lend to read; `x?` propagate `none` | `?T` read view; `T?` optional |
+| `!` | `!x` lend to write; `f()!` propagate failure | `!T` write view; `T!` fallible |
+| `+` | `+x` clone (a new owner) | |
+| `^` | `^x` box: move into a box with one owner | `^T` box |
+| `*` | `*x` share: move into a counted handle; `*w` of a weak handle upgrades it, a `*T?` | `*T` shared handle |
+| `~` | `~x` weak handle | `~T` weak handle |
+
+**An object is a value; `^` puts it on the heap and `*` shares it.** An object
+lives where it is declared and has no identity of its own: `b = a`
+copies a plain object and moves an owning one
+([Core §1](docs/CORE.md#1-four-kinds-of-value)).
+
+A sigil is a prefix where an operand starts, and an operator after a
+value, so `a < b` is still a comparison and `a * b` a product. A sigil
+touches what it marks, and an infix operator has the same spacing on
+both sides: `a < b` or `a<b`, never `a <b`. The
+[Core](docs/CORE.md) states what they mean in ten sentences, the
+[syntax guide](SYNTAX.md#5-prefixes-infixes-and-suffixes) shows the
+forms, the [language reference](SPEC.md) covers every rule, and
+[docs/DESIGN.md](docs/DESIGN.md) explains how the sigils form a small
+algebra.
+
+## Install
+
+Rig needs [Zig](https://ziglang.org/download/) 0.17 on `PATH`; `rig`
+itself runs `$ZIG` instead when it is set.
+
+```bash
+zig build                  # builds bin/rig in the checkout
+zig build -p ~/.local      # and installs ~/.local/bin/rig
+```
+
+The test runner also needs bash and either GNU `timeout` or perl
+(stock macOS has perl). [Nexus](https://github.com/shreeve/nexus)
+2.0, the parser generator, is needed only to change the grammar: clone
+it beside this checkout and build it there (`zig build
+-Doptimize=safe`), and `zig build parser` and the suite find it
+([AGENTS.md](AGENTS.md#workflow) has the details).
+
+## Build and run
+
+```bash
+bin/rig run examples/hello.rig         # check, build, and run (debug)
+bin/rig run file.rig -- a b            # the same, passing the program arguments
+bin/rig run --release file.rig         # the same, optimized (safe)
+bin/rig build -o hello file.rig        # a native executable
+bin/rig build --release=fast file.rig  # fast: no overflow checks, scalar or vector lanes
+bin/rig test file.rig                  # run the file's own `test` blocks
+bin/rig check file.rig                 # check only
+bin/rig emit file.rig                  # print the emitted Zig
+bin/rig clean                          # remove the cache of built programs
+bin/rig lsp                            # the language server, for an editor (editors/README.md)
+./test/run                             # the whole test suite
+```
+
+`rig run`, `build`, and `test` build each program in a directory of
+its own under `~/.cache/rig` (or `$XDG_CACHE_HOME/rig`, when that is an
+absolute path; or `$RIG_OUT_DIR` when set). At most once a day they
+remove the program directories there that no build has used for 5
+days, and say how many; `rig clean` removes them all. Both leave a
+program that a run, build, or test is still using, anything rig did
+not make, and a cache directory without rig's `CACHEDIR.TAG`, alone.
+The cache also stays under 10 GB: when it is over, the least recently
+used program directories go until it fits, and `RIG_CACHE_MAX_GB` sets
+the limit in gigabytes (0 for none). A `$RIG_OUT_DIR` is never trimmed.
+
+Debug builds (the default) check for memory leaks: a program that
+leaks reports how many allocations it lost and exits 1; set
+`RIG_LEAK_TRACE=1` when building to see where each was allocated.
+`--release` keeps the overflow, conversion, and bounds checks;
+`--release=fast` drops the overflow and conversion checks, for the lanes
+of a vector as for a scalar, which makes overflow undefined behavior. `rig --help` lists every command, option,
+and environment variable. The suite runs on Linux and macOS in
+[CI](.github/workflows/test.yml).
+
+## Status
+
+**Works today**, with tests for each feature:
+
+- objects (`obj` types) with field defaults, enums with payloads, error sets, type
+  aliases, module-level constants, methods with explicit receivers,
+  exhaustive `match`
+- generic types, functions, and methods (`obj Wrap[T]`,
+  `fun max[T](a: T, b: T) -> T`), with inferred type arguments and
+  per-instance checking, and compile-time value parameters
+  (`fun check[mode: Mode](n: Int)`)
+- `Int` and `Float` (64-bit), sized numbers, checked conversions
+  (`I32(x)`, `Float(n)`), compile-time checked constant arithmetic,
+  arrays, strings, read and write slices (`s[a..]`, `?xs[a..b]`,
+  `!xs[..b]`) with `copy`, `fill`, and `swap`, and fixed-width numbers
+  in bytes (`buf.read[U16, .big](at)`)
+- loops as values (`x = for ... break v ... else w`), labeled loops
+- moves, read and write views (including views returned from
+  functions and held in objects) whose loans end at their last use, clones,
+  drops, automatic drop on every path, drop glue, user `drop` bodies
+- shared `*T` and weak `~T` handles, `Cell`, `List`, `^T`, and `Signal`
+- `String`, owned text built with `String(a, b)` and `!t.add(...)`, whose
+  `?String` values (`?t[a..b]`) view it
+- stack and owned closures with explicit captures, any arity, inferred
+  parameter types, and return values
+- optionals with `none`, `??`, `if x as v`, and `x?`; fallible functions
+  that fail with error values, handled with `f()!`, `catch`, and
+  `catch |err|`; `error`, the owning type of an error of any set
+- modules with `pub` and `as`, `raw` blocks, C functions through
+  `extern`, and `test` blocks run by `rig test`
+- integer bit methods (`count_ones`, `leading_zeros`, `swap_bytes`, ...)
+  and the wrapping shift `<<%`, a bare `for xs`, and a statement
+  continued by a deeper line that starts with `.`
+- SIMD vectors, `Simd[T, n]`: lane-wise operators with the same overflow
+  rules as scalars, comparisons that give masks, and byte reads
+- `fun main() -> Int` for an exit status, and the start of a
+  [standard library](docs/STD.md): `std.math`, `std.os` (arguments and
+  environment), `std.file` (reading a whole file), `std.time`,
+  `std.random`, `std.sort`, `std.slices`, `std.text` (searching,
+  splitting, and parsing `?String` values), and
+  `std.json` (a fast JSON parser; experimental)
+
+**Not yet:** most of a standard library (writing files, maps, number
+formatting), concurrency, and async. [SPEC §18](SPEC.md#18-reserved-and-unsupported-forms)
+lists every form the compiler rejects as not supported yet, among them
+storing or returning a stack closure (lending one to a call, as a
+`?fun`, works);
+[the roadmap](docs/ROADMAP.md) lists the plans.
+
+## Learn more
+
+- [docs/CORE.md](docs/CORE.md): the ownership model on one page
+- [WELCOME.md](WELCOME.md): a guide for programmers coming from other
+  languages
+- [SYNTAX.md](SYNTAX.md): how every form is written
+- [SPEC.md](SPEC.md): the language reference, what every form means
+- [docs/STD.md](docs/STD.md): the standard library
+- [docs/DESIGN.md](docs/DESIGN.md): principles, the sigil algebra, and
+  influences
+- [docs/BEYOND-RUST.md](docs/BEYOND-RUST.md): what Rig changes for a Rust
+  programmer: the words, loans without lifetimes, and how the checker is
+  tested
+- [docs/INTERNALS.md](docs/INTERNALS.md): how the compiler works
+- [docs/ROADMAP.md](docs/ROADMAP.md): where Rig is going
+- [docs/json/](docs/json/DESIGN.md): the JSON parser's design and measurements
+- [docs/simd/](docs/simd/README.md): the design for portable vectors
+- [FAQ.md](FAQ.md): common questions
+- [examples/](examples/README.md): short programs
+- [AGENTS.md](AGENTS.md): rules for working on Rig

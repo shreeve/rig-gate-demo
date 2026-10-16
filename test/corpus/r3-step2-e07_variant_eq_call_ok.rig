@@ -1,0 +1,12 @@
+enum Shape
+  dot
+  line(v: List[Int])
+
+fun mk() -> Shape
+  p: List[Int] = List()
+  !p.push(1)
+  .line(v: <p)
+
+sub main()
+  if mk() != .dot
+    print("line")

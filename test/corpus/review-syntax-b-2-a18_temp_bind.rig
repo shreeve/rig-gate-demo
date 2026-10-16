@@ -1,0 +1,6 @@
+fun mk() -> String
+  String("hello")
+
+sub main()
+  s = mk()[1..]
+  print(s)

@@ -1,0 +1,6 @@
+obj P
+  c: Cell[List[Int]]
+
+sub main()
+  p = P(c: Cell(List()))
+  (<p).c.push(1)

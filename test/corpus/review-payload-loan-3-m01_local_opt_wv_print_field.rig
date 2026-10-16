@@ -1,0 +1,8 @@
+obj P
+  t: String
+
+sub main()
+  p = P(t: String("hello"))
+  o: (!P)? = !p
+  if o as y
+    print(y.t)

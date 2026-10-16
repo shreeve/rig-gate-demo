@@ -1,0 +1,5 @@
+sub f()
+  return
+
+sub main()
+  f()

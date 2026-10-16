@@ -1,0 +1,6 @@
+obj P
+  x: Int
+
+sub main()
+  c = *Cell(value: P(x: 1))
+  print(c.x)

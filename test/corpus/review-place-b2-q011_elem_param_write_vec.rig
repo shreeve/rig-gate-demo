@@ -1,0 +1,8 @@
+sub f(v: !List[Int])
+  v[0] = 5
+
+sub main()
+  v: List[Int] = List()
+  !v.push(1)
+  f(!v)
+  print(v[0])

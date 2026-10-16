@@ -1,0 +1,10 @@
+obj Node
+  v: Int
+
+obj Holder
+  h: *Node
+
+sub main()
+  n = *Node(1)
+  c = Holder(<n)
+  print(c, n)

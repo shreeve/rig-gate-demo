@@ -1,0 +1,4 @@
+use lib
+
+pub fun get() -> Int
+  lib.hidden().secret

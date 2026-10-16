@@ -1,0 +1,8 @@
+pub obj Noisy
+  pub n: Int
+
+  drop(!self)
+    print("drop", self.n)
+
+pub obj Holder
+  pub inner: Noisy

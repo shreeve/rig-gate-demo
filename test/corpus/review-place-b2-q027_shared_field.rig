@@ -1,0 +1,6 @@
+obj P
+  x: Int
+
+sub main()
+  h = *P(x: 1)
+  h.x = 5

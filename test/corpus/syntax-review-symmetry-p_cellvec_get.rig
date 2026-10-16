@@ -1,0 +1,3 @@
+sub main()
+  c = *Cell(value: List[Int]())
+  v = c.get()

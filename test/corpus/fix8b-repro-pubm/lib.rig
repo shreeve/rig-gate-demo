@@ -1,0 +1,5 @@
+pub obj Maker
+  x: Int
+
+  fun zeros[n: Int]() -> [n]Int
+    [0; n]

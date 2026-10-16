@@ -1,0 +1,8 @@
+LIMIT = 5
+
+enum E
+  a = LIMIT
+  b
+
+sub main()
+  print(Int(E.b))

@@ -1,0 +1,16 @@
+obj P
+  t: String
+
+enum G[T]
+  a(v: T)
+  b
+
+sub main()
+  p = P(t: String("hello"))
+  e: G[!P] = G.a(!p)
+  match e
+    .a(w)
+      r = ?w.t[1..]
+      w.t = String("other")
+      print(r)
+    .b => pass

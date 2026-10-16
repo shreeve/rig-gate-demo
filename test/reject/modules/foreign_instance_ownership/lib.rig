@@ -1,0 +1,13 @@
+pub fun twice[T](x: T) -> T
+  a = x
+  <a
+  x
+
+pub fun same[T](x: T) -> T
+  x
+
+pub obj Wrap[T]
+  pub v: T
+
+  fun get(?self) -> ?T
+    ?self.v

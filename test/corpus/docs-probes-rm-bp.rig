@@ -1,0 +1,9 @@
+obj P
+  s: ?String
+
+sub main()
+  b = ^"hi"
+  c = ^3
+  x: (?String)? = "o"
+  print(P(s: "hi"), b, c, x)
+  print(b)

@@ -1,0 +1,9 @@
+obj P
+  o: Int?
+
+fun mk() -> P
+  P(o: 1)
+
+sub main()
+  x = <mk().o
+  print(x ?? 0)

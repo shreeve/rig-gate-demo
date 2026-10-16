@@ -1,0 +1,6 @@
+obj P
+  x: Int
+
+sub main()
+  p = P.new(x: 1)
+  print(p.x)

@@ -1,0 +1,2 @@
+pub obj Wrap[T]
+  v: T

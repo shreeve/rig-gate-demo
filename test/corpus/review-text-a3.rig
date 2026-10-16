@@ -1,0 +1,4 @@
+sub main()
+  t = String("abcdefgh")
+  !t.add(t)
+  print(t)
