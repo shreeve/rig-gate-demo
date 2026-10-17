@@ -10,8 +10,6 @@ name: test
 # pull request from this repository they are skipped, under those names.
 on:
   pull_request:
-  schedule:
-    - cron: '17 9 * * *'
   workflow_dispatch:
 
 permissions:
